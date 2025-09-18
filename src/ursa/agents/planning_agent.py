@@ -39,6 +39,7 @@ class PlanningAgent(BaseAgent):
         self._initialize_agent()
 
     def generation_node(self, state: PlanningState) -> PlanningState:
+        print("PlanningAgent: generating . . .")
         messages = state["messages"]
         if isinstance(messages[0], SystemMessage):
             messages[0] = SystemMessage(content=self.planner_prompt)
@@ -53,6 +54,7 @@ class PlanningAgent(BaseAgent):
         }
 
     def formalize_node(self, state: PlanningState) -> PlanningState:
+        print("PlanningAgent: formalizing . . .")
         cls_map = {"ai": HumanMessage, "human": AIMessage}
         translated = [state["messages"][0]] + [
             cls_map[msg.type](content=msg.content)
@@ -78,6 +80,7 @@ class PlanningAgent(BaseAgent):
         }
 
     def reflection_node(self, state: PlanningState) -> PlanningState:
+        print("PlanningAgent: reflecting . . .")
         cls_map = {"ai": HumanMessage, "human": AIMessage}
         translated = [state["messages"][0]] + [
             cls_map[msg.type](content=msg.content)
