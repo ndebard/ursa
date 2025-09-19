@@ -82,10 +82,8 @@ class ExecutionAgent(BaseAgent):
         os.makedirs(new_state["workspace"], exist_ok=True)
 
         # code related to symlink
-        if (
-            "symlinkdir" in new_state.keys()
-            and "is_linked" not in new_state["symlinkdir"].keys()
-        ):
+        sd = new_state.get("symlinkdir")
+        if isinstance(sd, dict) and "is_linked" not in sd:
             # symlinkdir = {"source": "foo", "dest": "bar"}
             symlinkdir = new_state["symlinkdir"]
             # user provided a symlinkdir key - let's do the linking!
