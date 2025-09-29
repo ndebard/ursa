@@ -1,9 +1,10 @@
+import json
 import os
 
 # from langchain_core.runnables.graph import MermaidDrawMethod
 import subprocess
 from pathlib import Path
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import randomname
 from langchain_community.tools import (
@@ -32,7 +33,14 @@ from typing_extensions import TypedDict
 from ..prompt_library.execution_prompts import executor_prompt, summarize_prompt
 from ..util.diff_renderer import DiffRenderer
 from ..util.memory_logger import AgentMemory
-from .base import BaseAgent
+from .base import (
+    BaseAgent,
+    ensure_annotation_globals,
+    merge_metrics,
+    print_tool_timings,
+    timed_node,
+    timed_tool,
+)
 
 console = get_console()  # always returns the same instance
 
@@ -50,6 +58,7 @@ class ExecutionState(TypedDict):
     code_files: list[str]
     workspace: str
     symlinkdir: dict
+    __metrics__: Annotated[Dict[str, List[dict]], merge_metrics]
 
 
 class ExecutionAgent(BaseAgent):
@@ -64,14 +73,22 @@ class ExecutionAgent(BaseAgent):
         self.agent_memory = agent_memory
         self.executor_prompt = executor_prompt
         self.summarize_prompt = summarize_prompt
-        self.tools = [run_cmd, write_code, edit_code, search_tool]
+        tools_raw = [run_cmd, write_code, edit_code, ddg_search]
+        self.tools = [ensure_annotation_globals(t) for t in tools_raw]
+
         self.tool_node = ToolNode(self.tools)
         self.llm = self.llm.bind_tools(self.tools)
         self.log_state = log_state
 
         self._initialize_agent()
 
+    @timed_node
+    def tools_node(self, state: ExecutionState) -> ExecutionState:
+        # delegate to the prebuilt ToolNode explicitly
+        return self.tool_node.invoke(state)
+
     # Define the function that calls the model
+    @timed_node
     def query_executor(self, state: ExecutionState) -> ExecutionState:
         new_state = state.copy()
         if "workspace" not in new_state.keys():
@@ -125,6 +142,7 @@ class ExecutionAgent(BaseAgent):
         return {"messages": [response], "workspace": new_state["workspace"]}
 
     # Define the function that calls the model
+    @timed_node
     def summarize(self, state: ExecutionState) -> ExecutionState:
         messages = [SystemMessage(content=summarize_prompt)] + state["messages"]
         try:
@@ -160,6 +178,7 @@ class ExecutionAgent(BaseAgent):
         return {"messages": [response.content]}
 
     # Define the function that calls the model
+    @timed_node
     def safety_check(self, state: ExecutionState) -> ExecutionState:
         """
         Validate the safety of a pending shell command.
@@ -226,7 +245,9 @@ class ExecutionAgent(BaseAgent):
         self.graph = StateGraph(ExecutionState)
 
         self.graph.add_node("agent", self.query_executor)
-        self.graph.add_node("action", self.tool_node)
+        self.graph.add_node(
+            "action", self.wrap_runnable_as_node(self.tool_node, "tools_node")
+        )
         self.graph.add_node("summarize", self.summarize)
         self.graph.add_node("safety_check", self.safety_check)
 
@@ -258,19 +279,35 @@ class ExecutionAgent(BaseAgent):
         self.action = self.graph.compile(checkpointer=self.checkpointer)
         # self.action.get_graph().draw_mermaid_png(output_file_path="execution_agent_graph.png", draw_method=MermaidDrawMethod.PYPPETEER)
 
-    def run(self, prompt, recursion_limit=1000):
+    def run(self, prompt, recursion_limit=1000, report_metrics: bool = True):
         inputs = {"messages": [HumanMessage(content=prompt)]}
-        return self.action.invoke(
+        self._start_timer()
+        result = self.action.invoke(
             inputs,
             {
                 "recursion_limit": recursion_limit,
                 "configurable": {"thread_id": self.thread_id},
             },
         )
+        run_metric = self._build_metric(
+            ok=True, err=None, extra={"node": "run"}
+        )
+        result.setdefault("__metrics__", {}).setdefault(
+            f"{self.thread_id}", []
+        ).append(run_metric)
+        if report_metrics:
+            self.print_metrics_by_node(result, hide_zeros=True)
+            print_tool_timings()
+        return result
 
 
 @tool
-def run_cmd(query: str, state: Annotated[dict, InjectedState]) -> str:
+@timed_tool("run_cmd")
+def run_cmd(
+    query: str,
+    state: Annotated[dict, InjectedState],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
     """
     Run a commandline command from using the subprocess package in python
 
@@ -296,7 +333,20 @@ def run_cmd(query: str, state: Annotated[dict, InjectedState]) -> str:
     print("STDOUT: ", stdout)
     print("STDERR: ", stderr)
 
-    return f"STDOUT: {stdout} and STDERR: {stderr}"
+    result_text = f"STDOUT: {stdout}\nSTDERR: {stderr}"
+
+    # Build a ToolMessage so the user still sees the tool output,
+    # and also attach our metric in __metrics__.
+    msg = ToolMessage(content=result_text, tool_call_id=tool_call_id)
+    updates = {
+        "messages": [msg],
+        "__metrics__": {
+            state.get("__metrics__")
+            and next(iter(state["__metrics__"]), "ExecutionAgent"): []
+        },
+    }
+    # The metric gets filled by the decorator when this Command is returned:
+    return Command(update=updates)
 
 
 def _strip_fences(snippet: str) -> str:
@@ -315,6 +365,7 @@ def _strip_fences(snippet: str) -> str:
 
 
 @tool
+@timed_tool("write_code")
 def write_code(
     code: str,
     filename: str,
@@ -387,22 +438,17 @@ def write_code(
 
 
 @tool
+@timed_tool("edit_code")
 def edit_code(
     old_code: str,
     new_code: str,
     filename: str,
     state: Annotated[dict, InjectedState],
-) -> str:
-    """Replace the **first** occurrence of *old_code* with *new_code* in *filename*.
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Replace the **first** occurrence of *old_code* with *new_code* in *filename*."""
 
-    Args:
-        old_code: Code fragment to search for.
-        new_code: Replacement fragment.
-        filename: Target file inside the workspace.
-
-    Returns:
-        Success / failure message.
-    """
+    console = get_console()
     workspace_dir = state["workspace"]
     console.print("[cyan]Editing file:[/cyan]", filename)
 
@@ -416,27 +462,39 @@ def edit_code(
             "[red]File not found:[/]",
             filename,
         )
-        return f"Failed: {filename} not found."
+        msg = ToolMessage(
+            content=f"Failed: {filename} not found.",
+            tool_call_id=tool_call_id,
+        )
+        return Command(update={"messages": [msg]})
 
-    # Clean up markdown fences
+    # Clean up markdown fences (reuse your helper)
     old_code_clean = _strip_fences(old_code)
     new_code_clean = _strip_fences(new_code)
 
     if old_code_clean not in content:
         console.print(
-            "[yellow] ⚠️ 'old_code' not found in file'; no changes made.[/]"
+            "[yellow] ⚠️ 'old_code' not found in file; no changes made.[/]"
         )
-        return f"No changes made to {filename}: 'old_code' not found in file."
+        msg = ToolMessage(
+            content=f"No changes made to {filename}: 'old_code' not found in file.",
+            tool_call_id=tool_call_id,
+        )
+        return Command(update={"messages": [msg]})
 
     updated = content.replace(old_code_clean, new_code_clean, 1)
 
-    console.print(
-        Panel(
-            DiffRenderer(content, updated, filename),
-            title="Diff Preview",
-            border_style="cyan",
+    # Optional: show diff
+    try:
+        console.print(
+            Panel(
+                DiffRenderer(content, updated, filename),
+                title="Diff Preview",
+                border_style="cyan",
+            )
         )
-    )
+    except Exception:
+        pass
 
     try:
         with open(code_file, "w", encoding="utf-8") as f:
@@ -447,17 +505,47 @@ def edit_code(
             "[red]Failed to write file:[/]",
             exc,
         )
-        return f"Failed to edit {filename}."
+        msg = ToolMessage(
+            content=f"Failed to edit {filename}.",
+            tool_call_id=tool_call_id,
+        )
+        return Command(update={"messages": [msg]})
 
     console.print(
         f"[bold bright_white on green] :heavy_check_mark: [/] "
         f"[green]File updated:[/] {code_file}"
     )
-    return f"File {filename} updated successfully."
+
+    msg = ToolMessage(
+        content=f"File {filename} updated successfully.",
+        tool_call_id=tool_call_id,
+    )
+    return Command(update={"messages": [msg]})
 
 
 search_tool = DuckDuckGoSearchResults(output_format="json", num_results=10)
 # search_tool = TavilySearchResults(max_results=10, search_depth="advanced", include_answer=True)
+
+
+@tool
+@timed_tool("ddg_search")
+def ddg_search(
+    query: str,
+    state: Annotated[dict, InjectedState],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """
+    Search with DuckDuckGo and return the JSON results.
+    """
+    # `search_tool` is your existing DuckDuckGoSearchResults instance
+    res = search_tool.invoke({"query": query})
+    try:
+        content = json.dumps(res, ensure_ascii=False)
+    except Exception:
+        content = str(res)
+
+    msg = ToolMessage(content=content, tool_call_id=tool_call_id)
+    return Command(update={"messages": [msg]})
 
 
 # Define the function that determines whether to continue or not
