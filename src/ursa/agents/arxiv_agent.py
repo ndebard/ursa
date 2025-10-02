@@ -393,14 +393,25 @@ class ArxivAgent(BaseAgent):
 
         if self.summarize:
             if self.rag_embedding:
-                builder.add_node("rag_summarize", self._wrap_node(self._rag_node, "rag_node", "arxiv"))
+                builder.add_node(
+                    "rag_summarize",
+                    self._wrap_node(self._rag_node, "rag_node", "arxiv"),
+                )
 
                 builder.set_entry_point("fetch_papers")
                 builder.add_edge("fetch_papers", "rag_summarize")
                 builder.set_finish_point("rag_summarize")
             else:
-                builder.add_node("summarize_each", self._wrap_node(self._summarize_node, "summarize_each", "arxiv"))
-                builder.add_node("aggregate", self._wrap_node(self._aggregate_node, "aggregate", "arxiv"))
+                builder.add_node(
+                    "summarize_each",
+                    self._wrap_node(
+                        self._summarize_node, "summarize_each", "arxiv"
+                    ),
+                )
+                builder.add_node(
+                    "aggregate",
+                    self._wrap_node(self._aggregate_node, "aggregate", "arxiv"),
+                )
 
                 builder.set_entry_point("fetch_papers")
                 builder.add_edge("fetch_papers", "summarize_each")
