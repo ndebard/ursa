@@ -3,6 +3,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
+from typing import Any, Mapping
 from urllib.parse import quote
 
 import feedparser
@@ -142,6 +143,7 @@ class ArxivAgent(BaseAgent):
         self.rag_embedding = rag_embedding
 
         self.graph = self._build_graph()
+        self._action = self.graph
 
         os.makedirs(self.database_path, exist_ok=True)
 
@@ -259,10 +261,38 @@ class ArxivAgent(BaseAgent):
 
             try:
                 cleaned_text = remove_surrogates(paper["full_text"])
-                summary = chain.invoke({
-                    "retrieved_content": cleaned_text,
-                    "context": state["context"],
-                })
+                if self.rag_embedding:
+                    retriever = self._get_or_build_vectorstore(
+                        cleaned_text, arxiv_id
+                    )
+
+                    relevant_docs_with_scores = (
+                        retriever.vectorstore.similarity_search_with_score(
+                            state["context"], k=5
+                        )
+                    )
+
+                    if relevant_docs_with_scores:
+                        score = sum([
+                            s for _, s in relevant_docs_with_scores
+                        ]) / len(relevant_docs_with_scores)
+                        relevancy_scores[i] = abs(1.0 - score)
+                    else:
+                        relevancy_scores[i] = 0.0
+
+                    retrieved_content = "\n\n".join([
+                        doc.page_content for doc, _ in relevant_docs_with_scores
+                    ])
+                else:
+                    retrieved_content = cleaned_text
+
+                summary = chain.invoke(
+                    {
+                        "retrieved_content": retrieved_content,
+                        "context": state["context"],
+                    },
+                    config=self.build_config(tags=["arxiv", "summarize_each"]),
+                )
 
             except Exception as e:
                 summary = f"Error summarizing paper: {e}"
@@ -341,10 +371,13 @@ class ArxivAgent(BaseAgent):
 
         chain = prompt | self.llm | StrOutputParser()
 
-        final_summary = chain.invoke({
-            "Summaries": combined,
-            "context": state["context"],
-        })
+        final_summary = chain.invoke(
+            {
+                "Summaries": combined,
+                "context": state["context"],
+            },
+            config=self.build_config(tags=["arxiv", "aggregate"]),
+        )
 
         with open(self.summaries_path + "/final_summary.txt", "w") as f:
             f.write(final_summary)
@@ -353,18 +386,21 @@ class ArxivAgent(BaseAgent):
 
     def _build_graph(self):
         builder = StateGraph(PaperState)
-        builder.add_node("fetch_papers", self._fetch_node)
+        builder.add_node(
+            "fetch_papers",
+            self._wrap_node(self._fetch_node, "fetch_papers", "arxiv"),
+        )
 
         if self.summarize:
             if self.rag_embedding:
-                builder.add_node("rag_summarize", self._rag_node)
+                builder.add_node("rag_summarize", self._wrap_node(self._rag_node, "rag_node", "arxiv"))
 
                 builder.set_entry_point("fetch_papers")
                 builder.add_edge("fetch_papers", "rag_summarize")
                 builder.set_finish_point("rag_summarize")
             else:
-                builder.add_node("summarize_each", self._summarize_node)
-                builder.add_node("aggregate", self._aggregate_node)
+                builder.add_node("summarize_each", self._wrap_node(self._summarize_node, "summarize_each", "arxiv"))
+                builder.add_node("aggregate", self._wrap_node(self._aggregate_node, "aggregate", "arxiv"))
 
                 builder.set_entry_point("fetch_papers")
                 builder.add_edge("fetch_papers", "summarize_each")
@@ -376,23 +412,47 @@ class ArxivAgent(BaseAgent):
             builder.set_finish_point("fetch_papers")
 
         graph = builder.compile()
+
         return graph
 
-    def run(self, arxiv_search_query: str, context: str) -> str:
-        result = self.graph.invoke({
-            "query": arxiv_search_query,
-            "context": context,
-        })
+    def _invoke(
+        self,
+        inputs: Mapping[str, Any],
+        *,
+        summarize: bool | None = None,
+        recursion_limit: int = 1000,
+        **_,
+    ) -> str:
+        config = self.build_config(
+            recursion_limit=recursion_limit, tags=["graph"]
+        )
 
-        if self.summarize:
-            return result.get("final_summary", "No summary generated.")
-        else:
-            return "\n\nFinished Fetching papers!"
+        # this seems dumb, but it's b/c sometimes we had referred to the value as
+        # 'query' other times as 'arxiv_search_query' so trying to keep it compatible
+        # aliasing: accept arxiv_search_query -> query
+        if "query" not in inputs:
+            if "arxiv_search_query" in inputs:
+                # make a shallow copy and rename the key
+                inputs = dict(inputs)
+                inputs["query"] = inputs.pop("arxiv_search_query")
+            else:
+                raise KeyError(
+                    "Missing 'query' in inputs (alias 'arxiv_search_query' also accepted)."
+                )
+
+        result = self._action.invoke(inputs, config)
+
+        use_summary = self.summarize if summarize is None else summarize
+        return (
+            result.get("final_summary", "No summary generated.")
+            if use_summary
+            else "\n\nFinished Fetching papers!"
+        )
 
 
 if __name__ == "__main__":
     agent = ArxivAgent()
-    result = agent.run(
+    result = agent.invoke(
         arxiv_search_query="Experimental Constraints on neutron star radius",
         context="What are the constraints on the neutron star radius and what uncertainties are there on the constraints?",
     )

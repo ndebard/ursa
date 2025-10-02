@@ -15,6 +15,7 @@ from rich import get_console
 from rich.panel import Panel
 
 from ursa.agents import ExecutionAgent
+from ursa.observability.timing import render_session_summary
 
 console = get_console()  # always returns the same instance
 
@@ -46,8 +47,11 @@ db_path.parent.mkdir(parents=True, exist_ok=True)
 conn = sqlite3.connect(str(db_path), check_same_thread=False)
 checkpointer = SqliteSaver(conn)
 
+tid = "run-" + __import__("uuid").uuid4().hex[:8]
+
 # Init the execution agent with the model and checkpointer
 executor = ExecutionAgent(llm=model, checkpointer=checkpointer)
+executor.thread_id = tid
 executor_config = {
     "recursion_limit": 999_999,
     "configurable": {"thread_id": executor.thread_id},
@@ -60,12 +64,12 @@ for i, step_prompt in enumerate(problem):
     )
 
     # Invoke the agent
-    result = executor.action.invoke(
+    result = executor.invoke(
         {
             "messages": [HumanMessage(content=step_prompt)],
             "workspace": workspace,
         },
-        executor_config,
+        config=executor_config,
     )
 
     console.print(
@@ -75,3 +79,5 @@ for i, step_prompt in enumerate(problem):
             border_style="orange3",
         )
     )
+
+render_session_summary(tid)
