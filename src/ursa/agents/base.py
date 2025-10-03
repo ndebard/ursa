@@ -69,8 +69,8 @@ class BaseAgent(ABC):
                     "llm argument must be a string with the provider and model, or a BaseChatModel instance."
                 )
 
-        self.checkpointer = checkpointer
         self.thread_id = thread_id or uuid4().hex
+        self.checkpointer = checkpointer
         self.telemetry = Telemetry(
             enable=enable_metrics,
             output_dir=metrics_dir,
@@ -110,6 +110,13 @@ class BaseAgent(ABC):
                 "thread_id": self.thread_id,
                 "telemetry_run_id": self.telemetry.context.get("run_id"),
             },
+            # "configurable": {
+            #     "thread_id": getattr(self, "thread_id", "default")
+            # },
+            # "metadata": {
+            #     "thread_id": getattr(self, "thread_id", "default"),
+            #     "telemetry_run_id": self.telemetry.context.get("run_id"),
+            # },
             "tags": [self.name],
             "callbacks": self.telemetry.callbacks,
         }
