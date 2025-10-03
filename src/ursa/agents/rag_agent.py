@@ -2,7 +2,7 @@ import os
 import re
 import statistics
 from threading import Lock
-from typing import TypedDict, Mapping, Any
+from typing import Any, Mapping, TypedDict
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -255,7 +255,7 @@ class RAGAgent(BaseAgent):
                 "relevance_scores": relevance_scores,
             },
         }
-    
+
     def _invoke(
         self, inputs: Mapping[str, Any], recursion_limit: int = 100000, **_
     ):
@@ -264,12 +264,22 @@ class RAGAgent(BaseAgent):
         )
         return self._action.invoke(inputs, config)
 
-
     def _build_graph(self):
         builder = StateGraph(RAGState)
-        builder.add_node("Read Documents", self._wrap_node(self._read_docs,"Read Documents","rag"))
-        builder.add_node("Ingest Documents", self._wrap_node(self._ingest_docs, "Ingest Documents", "rag"))
-        builder.add_node("Retrieve and Summarize", self._wrap_node(self._summarize_node,"Retrieve and Summarize","rag"))
+        builder.add_node(
+            "Read Documents",
+            self._wrap_node(self._read_docs, "Read Documents", "rag"),
+        )
+        builder.add_node(
+            "Ingest Documents",
+            self._wrap_node(self._ingest_docs, "Ingest Documents", "rag"),
+        )
+        builder.add_node(
+            "Retrieve and Summarize",
+            self._wrap_node(
+                self._summarize_node, "Retrieve and Summarize", "rag"
+            ),
+        )
         builder.add_edge("Read Documents", "Ingest Documents")
         builder.add_edge("Ingest Documents", "Retrieve and Summarize")
 
