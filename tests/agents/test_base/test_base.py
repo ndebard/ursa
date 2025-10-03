@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Mapping, Any, TypedDict, Annotated
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -7,6 +8,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 # LangChain core bits
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langgraph.graph.message import add_messages
+from langgraph.graph import StateGraph
 
 # Your project imports
 from ursa.agents.base import BaseAgent
@@ -50,15 +53,40 @@ class TinyCountingModel(BaseChatModel):
         )
         return ChatResult(generations=[ChatGeneration(message=ai)])
 
+class TestState(TypedDict, total=False):
+    messages: Annotated[list, add_messages]
 
 # --- Minimal agent under test (subclasses BaseAgent and makes one LLM call) ---
 class TestAgent(BaseAgent):
-    def _run_impl(self, prompt: str, **kwargs):
+    def __init__(self, llm, checkpointer = None, enable_metrics = False, metrics_dir = "ursa_metrics", autosave_metrics = True, **kwargs):
+        super().__init__(llm, checkpointer, enable_metrics, metrics_dir, autosave_metrics, **kwargs)
+        self.graph = self._build_graph()
+        self._action = self.graph
+
+    def _run_impl(self, state:TestState):
         # Make one LLM call with callbacks + metadata wired in via build_config()
         cfg = self.build_config(tags=["TestAgent"])
-        _ = self.llm.invoke([HumanMessage(content=prompt)], config=cfg)
+        _ = self.llm.invoke(state["messages"], config=cfg)
         # Return something that looks like your agents' shape
         return {"messages": [AIMessage(content="done")]}
+    def _build_graph(self):
+        builder = StateGraph(TestState)
+        builder.add_node(
+            "run_impl",
+            self._wrap_node(self._run_impl, "run_impl", "test"),
+        )
+        builder.set_entry_point("run_impl")
+        builder.set_finish_point("run_impl")
+
+        graph = builder.compile()
+        return graph
+    def _invoke(
+        self, inputs: Mapping[str, Any], recursion_limit: int = 100000, **_
+    ):
+        config = self.build_config(
+            recursion_limit=recursion_limit, tags=["graph"]
+        )
+        return self._action.invoke(inputs, config)    
 
 
 @pytest.fixture
@@ -117,7 +145,7 @@ def test_base_agent_metrics_and_pricing(
     )
 
     # Run once (no network); prints telemetry and writes JSON
-    out = agent.run("hello tiny model")
+    out = agent.invoke("hello tiny model")
     assert isinstance(out, dict)
     assert "messages" in out
 
@@ -180,7 +208,7 @@ def test_metrics_toggle_off(tmp_path: Path, monkeypatch, pricing_file: Path):
         metrics_dir=str(metrics_dir),
     )
 
-    _ = agent.run("hello")
+    _ = agent.invoke("hello")
     # No files should be created
     files = list(metrics_dir.glob("*.json"))
     assert files == []

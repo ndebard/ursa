@@ -261,34 +261,9 @@ class ArxivAgent(BaseAgent):
 
             try:
                 cleaned_text = remove_surrogates(paper["full_text"])
-                if self.rag_embedding:
-                    retriever = self._get_or_build_vectorstore(
-                        cleaned_text, arxiv_id
-                    )
-
-                    relevant_docs_with_scores = (
-                        retriever.vectorstore.similarity_search_with_score(
-                            state["context"], k=5
-                        )
-                    )
-
-                    if relevant_docs_with_scores:
-                        score = sum([
-                            s for _, s in relevant_docs_with_scores
-                        ]) / len(relevant_docs_with_scores)
-                        relevancy_scores[i] = abs(1.0 - score)
-                    else:
-                        relevancy_scores[i] = 0.0
-
-                    retrieved_content = "\n\n".join([
-                        doc.page_content for doc, _ in relevant_docs_with_scores
-                    ])
-                else:
-                    retrieved_content = cleaned_text
-
                 summary = chain.invoke(
                     {
-                        "retrieved_content": retrieved_content,
+                        "retrieved_content": cleaned_text,
                         "context": state["context"],
                     },
                     config=self.build_config(tags=["arxiv", "summarize_each"]),

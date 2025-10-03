@@ -35,7 +35,7 @@ class BaseAgent(ABC):
         self,
         llm: str | BaseChatModel,
         checkpointer: BaseCheckpointSaver = None,
-        enable_metrics: bool = True,  # default to enabling metrics
+        enable_metrics: bool = False,  # default to enabling metrics
         metrics_dir: str = "ursa_metrics",  # dir to save metrics, with a default
         autosave_metrics: bool = True,
         **kwargs,

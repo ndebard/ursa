@@ -2,7 +2,7 @@ import os
 import re
 import statistics
 from threading import Lock
-from typing import TypedDict
+from typing import TypedDict, Mapping, Any
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -57,6 +57,7 @@ class RAGAgent(BaseAgent):
         self.summaries_path = summaries_path
         self.vectorstore_path = vectorstore_path
         self.graph = self._build_graph()
+        self._action = self.graph
 
         os.makedirs(self.vectorstore_path, exist_ok=True)
         self.vectorstore = self._open_global_vectorstore()
@@ -254,12 +255,21 @@ class RAGAgent(BaseAgent):
                 "relevance_scores": relevance_scores,
             },
         }
+    
+    def _invoke(
+        self, inputs: Mapping[str, Any], recursion_limit: int = 100000, **_
+    ):
+        config = self.build_config(
+            recursion_limit=recursion_limit, tags=["graph"]
+        )
+        return self._action.invoke(inputs, config)
+
 
     def _build_graph(self):
         builder = StateGraph(RAGState)
-        builder.add_node("Read Documents", self._read_docs)
-        builder.add_node("Ingest Documents", self._ingest_docs)
-        builder.add_node("Retrieve and Summarize", self._summarize_node)
+        builder.add_node("Read Documents", self._wrap_node(self._read_docs,"Read Documents","rag"))
+        builder.add_node("Ingest Documents", self._wrap_node(self._ingest_docs, "Ingest Documents", "rag"))
+        builder.add_node("Retrieve and Summarize", self._wrap_node(self._summarize_node,"Retrieve and Summarize","rag"))
         builder.add_edge("Read Documents", "Ingest Documents")
         builder.add_edge("Ingest Documents", "Retrieve and Summarize")
 
@@ -268,10 +278,6 @@ class RAGAgent(BaseAgent):
 
         graph = builder.compile()
         return graph
-
-    def run(self, context: str) -> str:
-        result = self.graph.invoke({"context": context})
-        return result.get("summary", "No summary generated.")
 
 
 # NOTE: Run test in `tests/agents/test_rag_agent/test_rag_agent.py` via:
