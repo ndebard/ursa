@@ -1,7 +1,17 @@
 import re
 from abc import ABC, abstractmethod
 from contextvars import ContextVar
-from typing import Any, Iterator, Mapping, Sequence, Union, final
+from typing import (
+    Any,
+    Callable,
+    Iterator,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+    final,
+)
+from uuid import uuid4
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.load import dumps
@@ -10,6 +20,7 @@ from langchain_core.runnables import (
 )
 from langchain_litellm import ChatLiteLLM
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.graph import StateGraph
 
 from ursa.observability.timing import (
     Telemetry,  # for timing / telemetry / metrics
@@ -17,7 +28,6 @@ from ursa.observability.timing import (
 
 InputLike = Union[str, Mapping[str, Any]]
 _INVOKE_DEPTH = ContextVar("_INVOKE_DEPTH", default=0)
-_MISSING = object()  # used in invoke below
 
 
 def _to_snake(s: str) -> str:
@@ -38,6 +48,7 @@ class BaseAgent(ABC):
         enable_metrics: bool = False,  # default to enabling metrics
         metrics_dir: str = "ursa_metrics",  # dir to save metrics, with a default
         autosave_metrics: bool = True,
+        thread_id: Optional[str] = None,
         **kwargs,
     ):
         match llm:
@@ -59,11 +70,27 @@ class BaseAgent(ABC):
                 )
 
         self.checkpointer = checkpointer
-        self.thread_id = self.__class__.__name__
+        self.thread_id = thread_id or uuid4().hex
         self.telemetry = Telemetry(
             enable=enable_metrics,
             output_dir=metrics_dir,
             save_json_default=autosave_metrics,
+        )
+
+    @property
+    def name(self) -> str:
+        """Agent name."""
+        return self.__class__.__name__
+
+    def add_node(
+        self,
+        graph: StateGraph,
+        f: Callable[..., Mapping[str, Any]],
+        node_name: Optional[str] = None,
+    ) -> StateGraph:
+        _node_name = node_name or f.__name__
+        return graph.add_node(
+            _node_name, self._wrap_node(f, _node_name, self.name)
         )
 
     def write_state(self, filename, state):
@@ -85,7 +112,7 @@ class BaseAgent(ABC):
                 "thread_id": getattr(self, "thread_id", "default"),
                 "telemetry_run_id": self.telemetry.context.get("run_id"),
             },
-            "tags": [self.__class__.__name__],
+            "tags": [self.name],
             "callbacks": self.telemetry.callbacks,
         }
         # include model name when we can
@@ -131,15 +158,15 @@ class BaseAgent(ABC):
     @final
     def invoke(
         self,
-        inputs: InputLike | object = _MISSING,  # sentinel
+        inputs: Optional[InputLike] = None,  # sentinel
         /,
         *,
         raw_debug: bool = False,
-        save_json: bool | None = None,
-        metrics_path: str | None = None,
-        save_raw_snapshot: bool | None = None,
-        save_raw_records: bool | None = None,
-        config: dict | None = None,
+        save_json: Optional[bool] = None,
+        metrics_path: Optional[str] = None,
+        save_raw_snapshot: Optional[bool] = None,
+        save_raw_records: Optional[bool] = None,
+        config: Optional[dict] = None,
         **kwargs: Any,  # may contain inputs (keyword-inputs) and/or control kw
     ) -> Any:
         depth = _INVOKE_DEPTH.get()
@@ -147,11 +174,11 @@ class BaseAgent(ABC):
         try:
             if depth == 0:
                 self.telemetry.begin_run(
-                    agent=self.__class__.__name__, thread_id=self.thread_id
+                    agent=self.name, thread_id=self.thread_id
                 )
 
             # If no positional inputs were provided, split kwargs into inputs vs control
-            if inputs is _MISSING:
+            if inputs is None:
                 kw_inputs: dict[str, Any] = {}
                 control_kwargs: dict[str, Any] = {}
                 for k, v in kwargs.items():
@@ -165,7 +192,7 @@ class BaseAgent(ABC):
             # If both positional inputs and extra unknown kwargs-as-inputs are given, forbid merging
             else:
                 # keep only control kwargs; anything else would be ambiguous
-                for k in list(kwargs.keys()):
+                for k in kwargs.keys():
                     if not (k in self._TELEMETRY_KW or k in self._CONTROL_KW):
                         raise TypeError(
                             f"Unexpected keyword argument '{k}'. "
@@ -236,7 +263,7 @@ class BaseAgent(ABC):
         try:
             if depth == 0:
                 self.telemetry.begin_run(
-                    agent=self.__class__.__name__, thread_id=self.thread_id
+                    agent=self.name, thread_id=self.thread_id
                 )
             normalized = self._normalize_inputs(inputs)
             yield from self._stream(normalized, config=config, **kwargs)
@@ -260,7 +287,7 @@ class BaseAgent(ABC):
         **kwargs: Any,
     ) -> Iterator[Any]:
         raise NotImplementedError(
-            f"{self.__class__.__name__} does not support streaming. "
+            f"{self.name} does not support streaming. "
             "Override _stream(...) in your agent to enable it."
         )
 
@@ -275,7 +302,7 @@ class BaseAgent(ABC):
     #     **kwargs
     # ):
     #     try:
-    #         self.telemetry.begin_run(agent=self.__class__.__name__, thread_id=self.thread_id)
+    #         self.telemetry.begin_run(agent=self.name, thread_id=self.thread_id)
     #         result = self._run_impl(*args, **kwargs)
     #         return result
     #     finally:
@@ -294,7 +321,7 @@ class BaseAgent(ABC):
     def _default_node_tags(
         self, name: str, extra: Sequence[str] | None = None
     ) -> list[str]:
-        tags = [self.__class__.__name__, "graph", name]
+        tags = [self.name, "graph", name]
         if extra:
             tags.extend(extra)
         return tags
@@ -309,15 +336,15 @@ class BaseAgent(ABC):
 
     def _node_cfg(self, name: str, *extra_tags: str) -> dict:
         """Build a consistent config for a node/runnable so we can reapply it after .map(), subgraph compile, etc."""
-        ns = extra_tags[0] if extra_tags else _to_snake(self.__class__.__name__)
-        tags = [self.__class__.__name__, "graph", name, *extra_tags]
+        ns = extra_tags[0] if extra_tags else _to_snake(self.name)
+        tags = [self.name, "graph", name, *extra_tags]
         return dict(
             run_name="node",  # keep "node:" prefixing in the timer; don't fight Rich labels here
             tags=tags,
             metadata={
                 "langgraph_node": name,
                 "ursa_ns": ns,
-                "ursa_agent": self.__class__.__name__,
+                "ursa_agent": self.name,
             },
         )
 
@@ -331,11 +358,11 @@ class BaseAgent(ABC):
         return self.ns(fn_or_runnable, name, *extra_tags)
 
     def _wrap_cond(self, fn: Any, name: str, *extra_tags: str):
-        ns = extra_tags[0] if extra_tags else _to_snake(self.__class__.__name__)
+        ns = extra_tags[0] if extra_tags else _to_snake(self.name)
         return RunnableLambda(fn).with_config(
             run_name="node",
             tags=[
-                self.__class__.__name__,
+                self.name,
                 "graph",
                 f"route:{name}",
                 *extra_tags,
@@ -343,18 +370,18 @@ class BaseAgent(ABC):
             metadata={
                 "langgraph_node": f"route:{name}",
                 "ursa_ns": ns,
-                "ursa_agent": self.__class__.__name__,
+                "ursa_agent": self.name,
             },
         )
 
     def _named(self, runnable: Any, name: str, *extra_tags: str):
-        ns = extra_tags[0] if extra_tags else _to_snake(self.__class__.__name__)
+        ns = extra_tags[0] if extra_tags else _to_snake(self.name)
         return runnable.with_config(
             run_name=name,
-            tags=[self.__class__.__name__, "graph", name, *extra_tags],
+            tags=[self.name, "graph", name, *extra_tags],
             metadata={
                 "langgraph_node": name,
                 "ursa_ns": ns,
-                "ursa_agent": self.__class__.__name__,
+                "ursa_agent": self.name,
             },
         )
