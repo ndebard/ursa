@@ -418,13 +418,10 @@ class ArxivAgent(BaseAgent):
         )
 
 
-if __name__ == "__main__":
-    from ursa.observability.timing import render_session_summary
-
-    agent = ArxivAgent(enable_metrics=True)
-    result = agent.invoke(
-        arxiv_search_query="Experimental Constraints on neutron star radius",
-        context="What are the constraints on the neutron star radius and what uncertainties are there on the constraints?",
-    )
-    print(result)
-    render_session_summary(agent.thread_id)
+# NOTE: Run test in `tests/agents/test_arxiv_agent/test_arxiv_agent.py` via:
+#
+# pytest -s tests/agents/test_arxiv_agent
+#
+# OR
+#
+# uv run pytest -s tests/agents/test_arxiv_agent
