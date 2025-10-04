@@ -21,7 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import InjectedState, ToolNode
 from langgraph.types import Command
-from litellm import ContentPolicyViolationError
+from litellm.exceptions import ContentPolicyViolationError
 
 # Rich
 from rich import get_console
@@ -263,7 +263,7 @@ class ExecutionAgent(BaseAgent):
         # self.action.get_graph().draw_mermaid_png(output_file_path="execution_agent_graph.png", draw_method=MermaidDrawMethod.PYPPETEER)
 
     def _invoke(
-        self, inputs: Mapping[str, Any], recursion_limit: int = 1000, **_
+        self, inputs: Mapping[str, Any], recursion_limit: int = 999_999, **_
     ):
         config = self.build_config(
             recursion_limit=recursion_limit, tags=["graph"]
