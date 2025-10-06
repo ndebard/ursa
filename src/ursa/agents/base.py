@@ -31,7 +31,11 @@ _INVOKE_DEPTH = ContextVar("_INVOKE_DEPTH", default=0)
 
 
 def _to_snake(s: str) -> str:
-    s = str(s)
+    s = re.sub(
+        r"^([A-Z]{2,})([A-Z][a-z])",
+        lambda m: m.group(1)[0] + m.group(1)[1:].lower() + m.group(2),
+        str(s),
+    )  # RAGAgent -> RagAgent
     s = re.sub(r"(?<!^)(?=[A-Z])", "_", s)  # CamelCase -> snake_case
     s = s.replace("-", "_").replace(" ", "_")
     return s.lower()
@@ -46,7 +50,7 @@ class BaseAgent(ABC):
         llm: str | BaseChatModel,
         checkpointer: BaseCheckpointSaver = None,
         enable_metrics: bool = False,  # default to enabling metrics
-        metrics_dir: str = "ursa_metrics",  # dir to save metrics, with a default
+        metrics_dir: str = ".ursa_metrics",  # dir to save metrics, with a default
         autosave_metrics: bool = True,
         thread_id: Optional[str] = None,
         **kwargs,
@@ -87,11 +91,23 @@ class BaseAgent(ABC):
         graph: StateGraph,
         f: Callable[..., Mapping[str, Any]],
         node_name: Optional[str] = None,
+        agent_name: Optional[str] = None,
     ) -> StateGraph:
+        """Add node to graph.
+
+        This is used to track token usage and is simply the following.
+
+        ```python
         _node_name = node_name or f.__name__
         return graph.add_node(
             _node_name, self._wrap_node(f, _node_name, self.name)
         )
+        ```
+        """
+        _node_name = node_name or f.__name__
+        _agent_name = agent_name or _to_snake(self.name)
+        wrapped_node = self._wrap_node(f, _node_name, _agent_name)
+        return graph.add_node(_node_name, wrapped_node)
 
     def write_state(self, filename, state):
         json_state = dumps(state, ensure_ascii=False)
