@@ -77,7 +77,7 @@ def main(mode: str):
         with console.status(
             "[bold green]Planning overarching steps . . .", spinner="point"
         ):
-            planning_output = planner.action.invoke(
+            planning_output = planner.invoke(
                 {"messages": [HumanMessage(content=problem)]},
                 {
                     "recursion_limit": 999_999,
@@ -130,7 +130,7 @@ def main(mode: str):
                     )
                 )
 
-                detail_output = planner.action.invoke(
+                detail_output = planner.invoke(
                     {"messages": [HumanMessage(content=step_prompt)]},
                     {
                         "recursion_limit": 999_999,
@@ -163,7 +163,7 @@ def main(mode: str):
                         )
                     )
 
-                    final_results = executor.action.invoke(
+                    final_results = executor.invoke(
                         {
                             "messages": [HumanMessage(content=sub_prompt)],
                             "workspace": workspace,

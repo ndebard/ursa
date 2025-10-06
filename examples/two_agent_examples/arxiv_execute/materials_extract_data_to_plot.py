@@ -25,7 +25,7 @@ def main():
     )
     agent.thread_id = tid
 
-    result = agent.run(
+    result = agent.invoke(
         arxiv_search_query="high entropy alloy hardness",
         context="What data and uncertainties are reported for hardness of the high entropy alloy and how that that compare to other alloys?",
     )
@@ -42,7 +42,7 @@ def main():
 
     init = {"messages": [HumanMessage(content=exe_plan)]}
 
-    final_results = executor.action.invoke(init)
+    final_results = executor.invoke(init)
 
     for x in final_results["messages"]:
         print(x.content)

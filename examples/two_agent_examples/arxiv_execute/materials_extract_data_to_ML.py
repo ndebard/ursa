@@ -1,4 +1,3 @@
-from langchain_community.callbacks import get_openai_callback
 from langchain_core.messages import HumanMessage
 from langchain_litellm import ChatLiteLLM
 
@@ -26,7 +25,7 @@ def main():
     )
     agent.thread_id = tid
 
-    result = agent.run(
+    result = agent.invoke(
         arxiv_search_query="high entropy alloy, yield strength, interstitial",
         context="Extract data that can be used to visualize how yield strength increase (%) depends on the interstital doping atomic percentage.",
     )
@@ -44,7 +43,7 @@ def main():
 
     init = {"messages": [HumanMessage(content=exe_plan)]}
 
-    final_results = executor.action.invoke(init, {"recursion_limit": 10000})
+    final_results = executor.invoke(init, {"recursion_limit": 10000})
 
     for x in final_results["messages"]:
         print(x.content)
@@ -53,8 +52,4 @@ def main():
 
 
 if __name__ == "__main__":
-    with get_openai_callback() as cbh:
-        main()
-    print(f"Total Tokens Used: {cbh.total_tokens}")
-    print(f"Prompt Tokens: {cbh.prompt_tokens}")
-    print(f"Completion Tokens: {cbh.completion_tokens}")
+    main()

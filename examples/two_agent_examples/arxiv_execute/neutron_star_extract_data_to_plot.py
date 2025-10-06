@@ -25,7 +25,7 @@ def main():
     )
     agent.thread_id = tid
 
-    result = agent.run(
+    result = agent.invoke(
         arxiv_search_query="Experimental Constraints on neutron star radius",
         context="What are the constraints on the neutron star radius and what uncertainties are there on the constraints?",
     )
@@ -44,7 +44,7 @@ def main():
 
     init = {"messages": [HumanMessage(content=exe_plan)]}
 
-    final_results = executor.action.invoke(init)
+    final_results = executor.invoke(init)
 
     for x in final_results["messages"]:
         print(x.content)

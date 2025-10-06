@@ -4,7 +4,7 @@ from typing import Annotated, Any, Dict, Iterator, List, Mapping, Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import Field
 from typing_extensions import TypedDict
@@ -36,7 +36,7 @@ class PlanningAgent(BaseAgent):
         self.planner_prompt = planner_prompt
         self.formalize_prompt = formalize_prompt
         self.reflection_prompt = reflection_prompt
-        self._initialize_agent()
+        self._action = self._build_graph()
 
     def generation_node(self, state: PlanningState) -> PlanningState:
         print("PlanningAgent: generating . . .")
@@ -95,28 +95,19 @@ class PlanningAgent(BaseAgent):
         )
         return {"messages": [HumanMessage(content=res.content)]}
 
-    def _initialize_agent(self):
-        self.graph = StateGraph(PlanningState)
-        self.graph.add_node(
-            "generate",
-            self._wrap_node(self.generation_node, "generate", "planner"),
-        )
-        self.graph.add_node(
-            "reflect",
-            self._wrap_node(self.reflection_node, "reflect", "planner"),
-        )
-        self.graph.add_node(
-            "formalize",
-            self._wrap_node(self.formalize_node, "formalize", "planner"),
-        )
+    def _build_graph(self):
+        graph = StateGraph(PlanningState)
+        self.add_node(graph, self.generation_node, "generate")
+        self.add_node(graph, self.reflection_node, "reflect")
+        self.add_node(graph, self.formalize_node, "formalize")
 
         # Edges
-        self.graph.add_edge(START, "generate")
-        self.graph.add_edge("generate", "reflect")
-        self.graph.add_edge("formalize", END)
+        graph.set_entry_point("generate")
+        graph.add_edge("generate", "reflect")
+        graph.set_finish_point("formalize")
 
         # Time the router logic too
-        self.graph.add_conditional_edges(
+        graph.add_conditional_edges(
             "reflect",
             self._wrap_cond(should_continue, "should_continue", "planner"),
             {"generate": "generate", "formalize": "formalize"},
@@ -124,7 +115,7 @@ class PlanningAgent(BaseAgent):
 
         # memory      = MemorySaver()
         # self.action = self.graph.compile(checkpointer=memory)
-        self._action = self.graph.compile(checkpointer=self.checkpointer)
+        return graph.compile(checkpointer=self.checkpointer)
         # self.action.get_graph().draw_mermaid_png(output_file_path="planning_agent_graph.png", draw_method=MermaidDrawMethod.PYPPETEER)
 
     def _invoke(

@@ -142,8 +142,7 @@ class ArxivAgent(BaseAgent):
         self.download_papers = download_papers
         self.rag_embedding = rag_embedding
 
-        self.graph = self._build_graph()
-        self._action = self.graph
+        self._action = self._build_graph()
 
         os.makedirs(self.database_path, exist_ok=True)
 
@@ -309,7 +308,7 @@ class ArxivAgent(BaseAgent):
             embedding=self.rag_embedding,
             database_path=self.database_path,
         )
-        new_state["final_summary"] = rag_agent.run(context=state["context"])
+        new_state["final_summary"] = rag_agent.invoke(context=state["context"])
         return new_state
 
     def _aggregate_node(self, state: PaperState) -> PaperState:
@@ -397,9 +396,7 @@ class ArxivAgent(BaseAgent):
             builder.set_entry_point("fetch_papers")
             builder.set_finish_point("fetch_papers")
 
-        graph = builder.compile()
-
-        return graph
+        return builder.compile(checkpointer=self.checkpointer)
 
     def _invoke(
         self,

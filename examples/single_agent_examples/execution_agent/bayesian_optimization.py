@@ -30,7 +30,7 @@ tid = "run-" + __import__("uuid").uuid4().hex[:8]
 
 # Initialize the agent
 executor = ExecutionAgent(
-    agent_memory=memory, llm=model
+    agent_memory=memory, llm=model, enable_metrics=True
 )  # , enable_metrics=False if you don't want metrics
 executor.thread_id = tid
 

@@ -17,7 +17,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.tools import InjectedToolCallId, tool
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import InjectedState, ToolNode
 from langgraph.types import Command
@@ -69,7 +69,7 @@ class ExecutionAgent(BaseAgent):
         self.llm = self.llm.bind_tools(self.tools)
         self.log_state = log_state
 
-        self._initialize_agent()
+        self._action = self._build_graph()
 
     # Define the function that calls the model
     def query_executor(self, state: ExecutionState) -> ExecutionState:
@@ -222,44 +222,34 @@ class ExecutionAgent(BaseAgent):
 
         return new_state
 
-    def _initialize_agent(self):
-        self.graph = StateGraph(ExecutionState)
+    def _build_graph(self):
+        graph = StateGraph(ExecutionState)
 
-        self.graph.add_node(
-            "agent", self._wrap_node(self.query_executor, "agent", "execution")
-        )
-        self.graph.add_node(
-            "action", self._wrap_node(self.tool_node, "action", "execution")
-        )
-        self.graph.add_node(
-            "summarize",
-            self._wrap_node(self.summarize, "summarize", "execution"),
-        )
-        self.graph.add_node(
-            "safety_check",
-            self._wrap_node(self.safety_check, "safety_check", "execution"),
-        )
+        self.add_node(graph, self.query_executor, "agent")
+        self.add_node(graph, self.tool_node, "action")
+        self.add_node(graph, self.summarize, "summarize")
+        self.add_node(graph, self.safety_check, "safety_check")
 
         # Set the entrypoint as `agent`
         # This means that this node is the first one called
-        self.graph.add_edge(START, "agent")
+        graph.set_entry_point("agent")
 
-        self.graph.add_conditional_edges(
+        graph.add_conditional_edges(
             "agent",
             self._wrap_cond(should_continue, "should_continue", "execution"),
             {"continue": "safety_check", "summarize": "summarize"},
         )
 
-        self.graph.add_conditional_edges(
+        graph.add_conditional_edges(
             "safety_check",
             self._wrap_cond(command_safe, "command_safe", "execution"),
             {"safe": "action", "unsafe": "agent"},
         )
 
-        self.graph.add_edge("action", "agent")
-        self.graph.add_edge("summarize", END)
+        graph.add_edge("action", "agent")
+        graph.set_finish_point("summarize")
 
-        self._action = self.graph.compile(checkpointer=self.checkpointer)
+        return graph.compile(checkpointer=self.checkpointer)
         # self.action.get_graph().draw_mermaid_png(output_file_path="execution_agent_graph.png", draw_method=MermaidDrawMethod.PYPPETEER)
 
     def _invoke(

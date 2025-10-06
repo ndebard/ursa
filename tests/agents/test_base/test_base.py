@@ -141,7 +141,7 @@ def test_base_agent_metrics_and_pricing(
     tmp_path: Path, monkeypatch, pricing_file: Path
 ):
     """
-    End-to-end: BaseAgent.run() triggers telemetry + pricing using a fake chat model.
+    End-to-end: BaseAgent.invoke() triggers telemetry + pricing using a fake chat model.
     Asserts:
       - llm_events present with 1 call
       - usage_rollup matches fake counts

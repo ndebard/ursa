@@ -33,19 +33,12 @@ def main():
 
     # t0 = time.time()
 
-    agent.invoke(
+    results = agent.invoke(
         arxiv_search_query="High Entropy Alloys",
         context="Find High entropy alloys suitable for application under extreme conditions. For candidates that you identify, provide the starting structure, crystal structure, lattice parameters, and space group.",
     )
 
-    # t1 = time.time()
-
-    # print(f"Time Taken: {t1 - t0}")
-    # print(f"Total Tokens Used: {callback_handler.total_tokens}")
-    # print(f"Prompt Tokens: {callback_handler.prompt_tokens}")
-    # print(f"Completion Tokens: {callback_handler.completion_tokens}")
-    # print(f"Successful Requests: {callback_handler.successful_requests}")
-    # print(f"Total Cost (USD): ${callback_handler.total_cost}")
+    print(results)
 
     render_session_summary(tid)
 

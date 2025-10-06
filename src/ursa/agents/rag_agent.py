@@ -289,7 +289,7 @@ class RAGAgent(BaseAgent):
         graph.set_entry_point("_read_docs_node")
         graph.set_finish_point("_retrieve_and_summarize_node")
 
-        return graph.compile()
+        return graph.compile(checkpointer=self.checkpointer)
 
 
 # NOTE: Run test in `tests/agents/test_rag_agent/test_rag_agent.py` via:
