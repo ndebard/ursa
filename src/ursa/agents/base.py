@@ -69,8 +69,8 @@ class BaseAgent(ABC):
                     "llm argument must be a string with the provider and model, or a BaseChatModel instance."
                 )
 
-        self.checkpointer = checkpointer
         self.thread_id = thread_id or uuid4().hex
+        self.checkpointer = checkpointer
         self.telemetry = Telemetry(
             enable=enable_metrics,
             output_dir=metrics_dir,
@@ -105,13 +105,18 @@ class BaseAgent(ABC):
         You can pass overrides like recursion_limit=..., configurable={...}, etc.
         """
         base = {
-            "configurable": {
-                "thread_id": getattr(self, "thread_id", "default")
-            },
+            "configurable": {"thread_id": self.thread_id},
             "metadata": {
-                "thread_id": getattr(self, "thread_id", "default"),
+                "thread_id": self.thread_id,
                 "telemetry_run_id": self.telemetry.context.get("run_id"),
             },
+            # "configurable": {
+            #     "thread_id": getattr(self, "thread_id", "default")
+            # },
+            # "metadata": {
+            #     "thread_id": getattr(self, "thread_id", "default"),
+            #     "telemetry_run_id": self.telemetry.context.get("run_id"),
+            # },
             "tags": [self.name],
             "callbacks": self.telemetry.callbacks,
         }
@@ -200,9 +205,9 @@ class BaseAgent(ABC):
                             "inputs and pass them as keyword arguments."
                         )
 
-            normalized = self._normalize_inputs(
-                inputs
-            )  # subclasses may translate keys
+            # subclasses may translate keys
+            normalized = self._normalize_inputs(inputs)
+
             # forward config + any control kwargs (e.g., recursion_limit) to the agent
             return self._invoke(normalized, config=config, **kwargs)
 

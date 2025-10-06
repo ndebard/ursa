@@ -17,8 +17,8 @@ from PIL import Image
 from tqdm import tqdm
 from typing_extensions import List, TypedDict
 
-from .base import BaseAgent
-from .rag_agent import RAGAgent
+from ursa.agents.base import BaseAgent
+from ursa.agents.rag_agent import RAGAgent
 
 try:
     from openai import OpenAI
@@ -359,44 +359,28 @@ class ArxivAgent(BaseAgent):
         return {**state, "final_summary": final_summary}
 
     def _build_graph(self):
-        builder = StateGraph(PaperState)
-        builder.add_node(
-            "fetch_papers",
-            self._wrap_node(self._fetch_node, "fetch_papers", "arxiv"),
-        )
+        graph = StateGraph(PaperState)
 
+        self.add_node(graph, self._fetch_node)
         if self.summarize:
             if self.rag_embedding:
-                builder.add_node(
-                    "rag_summarize",
-                    self._wrap_node(self._rag_node, "rag_node", "arxiv"),
-                )
-
-                builder.set_entry_point("fetch_papers")
-                builder.add_edge("fetch_papers", "rag_summarize")
-                builder.set_finish_point("rag_summarize")
+                self.add_node(graph, self._rag_node)
+                graph.set_entry_point("_fetch_node")
+                graph.add_edge("_fetch_node", "_rag_node")
+                graph.set_finish_point("_rag_node")
             else:
-                builder.add_node(
-                    "summarize_each",
-                    self._wrap_node(
-                        self._summarize_node, "summarize_each", "arxiv"
-                    ),
-                )
-                builder.add_node(
-                    "aggregate",
-                    self._wrap_node(self._aggregate_node, "aggregate", "arxiv"),
-                )
+                self.add_node(graph, self._summarize_node)
+                self.add_node(graph, self._aggregate_node)
 
-                builder.set_entry_point("fetch_papers")
-                builder.add_edge("fetch_papers", "summarize_each")
-                builder.add_edge("summarize_each", "aggregate")
-                builder.set_finish_point("aggregate")
-
+                graph.set_entry_point("_fetch_node")
+                graph.add_edge("_fetch_node", "_summarize_node")
+                graph.add_edge("_summarize_node", "_aggregate_node")
+                graph.set_finish_point("_aggregate_node")
         else:
-            builder.set_entry_point("fetch_papers")
-            builder.set_finish_point("fetch_papers")
+            graph.set_entry_point("_fetch_node")
+            graph.set_finish_point("_fetch_node")
 
-        return builder.compile(checkpointer=self.checkpointer)
+        return graph.compile(checkpointer=self.checkpointer)
 
     def _invoke(
         self,
@@ -433,11 +417,10 @@ class ArxivAgent(BaseAgent):
         )
 
 
-if __name__ == "__main__":
-    agent = ArxivAgent()
-    result = agent.invoke(
-        arxiv_search_query="Experimental Constraints on neutron star radius",
-        context="What are the constraints on the neutron star radius and what uncertainties are there on the constraints?",
-    )
-
-    print(result)
+# NOTE: Run test in `tests/agents/test_arxiv_agent/test_arxiv_agent.py` via:
+#
+# pytest -s tests/agents/test_arxiv_agent
+#
+# OR
+#
+# uv run pytest -s tests/agents/test_arxiv_agent
