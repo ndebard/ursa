@@ -1070,7 +1070,7 @@ class Telemetry:
 
     # ---------- JSON/export helpers ----------
     def begin_run(self, *, agent: str, thread_id: str) -> None:
-        """Call at the start of BaseAgent.run()."""
+        """Call at the start of BaseAgent.invoke()."""
         self.context.clear()
         self.context.update({
             "agent": agent,
