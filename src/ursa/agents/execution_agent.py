@@ -285,6 +285,7 @@ def _snip_text(text: str, max_chars: int) -> tuple[str, bool]:
         True,
     )
 
+
 def _fit_streams_to_budget(stdout: str, stderr: str, total_budget: int):
     label_overhead = len("STDOUT:\n") + len("\nSTDERR:\n")
     budget = max(0, total_budget - label_overhead)
@@ -300,9 +301,11 @@ def _fit_streams_to_budget(stdout: str, stderr: str, total_budget: int):
     stderr_snip, _ = _snip_text(stderr, stderr_budget)
     return stdout_snip, stderr_snip
 
+
 # the idea here is that we just set a limit - the user could overload
 # that in their env, or maybe we could pull this out of the LLM parameters
-MAX_TOOL_MSG_CHARS = int(os.getenv("MAX_TOOL_MSG_CHARS", "100000"))
+MAX_TOOL_MSG_CHARS = int(os.getenv("MAX_TOOL_MSG_CHARS", "50000"))
+
 
 @tool
 def run_cmd(query: str, state: Annotated[dict, InjectedState]) -> str:
