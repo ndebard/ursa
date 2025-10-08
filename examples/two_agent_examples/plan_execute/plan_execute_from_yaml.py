@@ -4,9 +4,9 @@ import sys
 from types import SimpleNamespace as NS
 from typing import Any
 
-import coolname
 import httpx
 import litellm
+import randomname
 import truststore
 import yaml
 from langchain_core.messages import HumanMessage
@@ -40,7 +40,7 @@ def main(model_name: str, config: Any, planning_mode: str = "hierarchical"):
     try:
         problem = getattr(config, "problem", "")
         project = getattr(config, "project", "run")
-        workspace = f"{project}_{coolname.generate_slug(2)}"
+        workspace = f"{project}_{randomname.get_name()}"
         # workspace_header = f"[cyan] (- [bold cyan]{workspace}[reset][cyan] -) [reset]"
         symlinkdict = getattr(config, "symlink", {}) or None
 
