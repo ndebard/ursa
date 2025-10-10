@@ -123,8 +123,8 @@ the following commands:
 ### Docker
 
 ```shell
-# Build a local container using the Docker runtime
-docker buildx build --progress=plain -t ursa .
+# Pull the image
+docker pull ghcr.io/lanl/ursa
 
 # Run included example
 docker run -e "OPENAI_API_KEY"=$OPENAI_API_KEY ursa \
@@ -146,8 +146,8 @@ that is sometimes preferred on HPC. The following commands replicate the
 behaviors above for docker.
 
 ```shell
-# Build a local container using the Docker runtime
-ch-image build -t ursa
+# Pull the image
+ch-image pull ghcr.io/lanl/ursa --arch=yolo
 
 # Convert image to sqfs, for use on another system
 ch-convert ursa ursa.sqfs
