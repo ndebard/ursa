@@ -11,7 +11,7 @@ project: pi_multiple_ways
 #  source: ./some-destination-directory
 #  dest: the-directory-name-symlinked-for-this-instance-to-see
 
-# this task is easy enough that you should consider running it with a lot
+# this task is easy enough that you should consider running it with a low
 # quality / fast model like o3-mini
 # this demo isn't intended to give you really high quality results, but
 # o3-mini doesn't always work for agentic tasks like URSA, so don't be 
