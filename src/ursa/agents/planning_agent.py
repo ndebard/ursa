@@ -162,14 +162,6 @@ class PlanningAgent(BaseAgent):
 config = {"configurable": {"thread_id": "1"}}
 
 
-# def should_continue(state: PlanningState):
-#     if len(state["messages"]) > (state.get("reflection_steps", 3) + 3):
-#         return "formalize"
-#     if "[APPROVED]" in state["messages"][-1].content:
-#         return "formalize"
-#     return "generate"
-
-
 def should_continue(state: PlanningState):
     reviewMaxLength = 0  # 0 = no limit, else some character limit like 300
 
