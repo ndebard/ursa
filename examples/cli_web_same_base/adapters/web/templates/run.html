@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Run — Integer Sum{% endblock %}
+
+{% block content %}
+<div class="grid" id="layout" data-sid="{{ sid }}">
+  <section class="pane controls">
+    <h2>Controls</h2>
+    <div class="row">
+      <span>Status:</span>
+      <span id="run-status" class="pill muted">{{ status }}</span>
+    </div>
+    <div class="row">
+      <button id="action-cancel" class="btn danger">Cancel</button>
+    </div>
+    <div class="row">
+      <label>Workspace</label>
+      <code>{{ workspace }}</code>
+    </div>
+    <div class="hint">Live events stream via SSE; files pane polls every 2s.</div>
+  </section>
+
+  <section class="pane output">
+    <h2>Job Output</h2>
+    <div id="job-output" class="scroll"></div>
+  </section>
+
+  <section class="pane files">
+    <h2>Files</h2>
+    <div id="file-tree" class="scroll"></div>
+    <h3>
+        <span id="preview-title">Preview</span>
+        <span id="updated-badge" class="badge" hidden aria-live="polite">UPDATED</span>
+    </h3>
+    <div id="file-viewer" class="scroll preview code-viewer"></div>
+  </section>
+</div>
+<script>document.body.dataset.sid = "{{ sid }}";</script>
+<script src="/static/app.js"></script>
+{% endblock %}

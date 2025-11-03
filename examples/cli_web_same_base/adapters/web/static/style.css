@@ -1,0 +1,257 @@
+:root {
+  --bg: #0f172a;          /* page background */
+  --panel: #0b1222;       /* card/panel background */
+  --text: #e5e7eb;        /* main text color */
+  --muted: #9ca3af;
+  --accent: #f59e0b;
+  --danger: #ef4444;
+  --border: #263041;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ----- Layout locking: page uses full viewport; panes scroll internally ----- */
+html, body { height: 100%; }
+body.shell {
+  min-height: 100vh;                /* full viewport */
+  display: grid;
+  grid-template-rows: auto 1fr auto;/* header | main | footer */
+  overflow: hidden;                 /* prevent page-level scrolling */
+}
+
+.site-header, .site-footer { flex: 0 0 auto; }
+.container {
+  max-width: 1200px;                /* adjust to taste */
+  margin: 24px auto;
+  padding: 0 16px;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;                 /* no outer scrollbars */
+}
+
+/* Your 3-column layout fills the available height */
+.grid {
+  display: grid;
+  grid-template-columns: 300px 1fr 360px; /* files | output | controls (tweak widths) */
+  grid-template-rows: 1fr;                /* single row that fills */
+  gap: 16px;
+  height: 100%;
+  min-height: 0;                          /* allow children to shrink and scroll */
+}
+
+/* Each pane is a flex column with an internal scroller */
+.pane {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;                          /* critical for nested scroll */
+  min-width: 0;                           /* avoid width blow-ups from long content */
+}
+.pane h2, .pane h3 { margin-top: 0; }
+
+/* The scrollable region inside a pane */
+.pane .scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;                         /* scroll INSIDE the pane */
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: #0a0f1c;
+}
+
+/* Prevent job-output from forcing the grid to expand */
+.pane.output { min-width: 0; }
+.pane.output #job-output { min-width: 0; }
+
+/* Ensure long lines wrap rather than grow the pane */
+.panel pre, .card pre, .code-viewer, .code-viewer pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+
+
+/* grid layout: [files | output | controls] */
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 2fr 1fr;
+  gap: 16px;
+}
+
+.pane { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; min-height: 65vh; display: flex; flex-direction: column; }
+.pane h2 { margin-top: 0; }
+.scroll { overflow: auto; flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #0a0f1c; }
+
+.pane.output #job-output .card, .pane.output #job-output .panel { margin-bottom: 12px; }
+
+.pill { padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); }
+.pill.muted { color: var(--muted); }
+.pill.accent { background: var(--accent); color: var(--accent-contrast); border: none; }
+.pill.success { background: #22c55e; color: #031507; border: none; }
+.pill.danger { background: var(--danger); color: #250000; border: none; }
+
+.btn { background: var(--accent); color: var(--accent-contrast); border: none; border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+.btn.danger { background: var(--danger); color: white; }
+.btn:hover { filter: brightness(1.05); }
+
+.row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.hint { color: var(--muted); font-size: 12px; margin-top: auto; }
+
+.tree { list-style: none; padding-left: 16px; }
+.tree .dir { color: var(--muted); }
+.tree .file { background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; cursor: pointer; }
+.tree .file:hover { background: #0f1a2e; }
+
+.preview { min-height: 120px; }
+
+/* existing panel styles stay the same; we already added .panel, .panel-header, .panel-body, .panel-orange/red earlier */
+.panel-orange .panel-header { color: var(--accent); }
+.panel-red .panel-header { color: var(--danger); }
+
+/* Files pane readability */
+.pane.files .scroll {
+  background: #0b1222;          /* slightly lighter than before */
+  color: #e5e7eb;
+}
+
+.tree { list-style: none; padding-left: 16px; font-size: 14px; line-height: 1.45; }
+.tree li { margin: 4px 0; }
+
+.tree .dir {
+  color: #cbd5e1;               /* lighter than --muted */
+  font-weight: 600;
+}
+
+/* Neutralize native button look (Safari/Firefox/Windows) */
+.tree .file {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;      /* use background-color to override UA too */
+  background-color: transparent;
+  color: #e5e7eb !important;    /* force light text */
+  border: 1px solid #263041;    /* higher contrast border */
+  border-radius: 6px;
+  padding: 4px 8px;
+  display: inline-block;
+  cursor: pointer;
+  font: inherit;                /* inherit font family/size */
+}
+
+.tree .file:hover {
+  background-color: #111c2e;
+  border-color: #334155;
+}
+
+.tree .file:focus {
+  outline: 2px solid #f59e0b;
+  outline-offset: 2px;
+}
+
+/* Job Output pane: readable defaults */
+.pane.output .scroll {
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* Cards printed into the output */
+.pane.output #job-output .card {
+  background: #0c162b;             /* tweak this if still too dark */
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+/* Panels printed into the output */
+.pane.output #job-output .panel {
+  background: #0c162b;             /* same as card for consistency */
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* Panel internals */
+.panel-header {
+  background: #0a0f1c;
+  color: var(--text);               /* default header text color */
+  border-bottom: 1px solid var(--border);
+  padding: 10px 14px;
+  font-weight: 700;
+}
+
+.panel-body {
+  color: var(--text);
+  padding: 14px;
+}
+
+/* Ensure preformatted text is high-contrast */
+.panel pre, .card pre {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/* Keep your variant accents */
+.panel-orange .panel-header { color: var(--accent); }
+.panel-red    .panel-header { color: var(--danger); }
+
+/* Headings inside panes (optional bump) */
+.pane h2, .pane h3 { color: #ffffff; }
+
+.code-viewer {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  line-height: 1.5;
+}
+
+/* Make sure highlighted code contrasts well on dark background */
+.code-viewer pre {
+  margin: 0;
+  background: transparent;   /* Pygments inlines colors; don’t override */
+  color: var(--text);
+}
+
+
+/* --- Pulse animation for the preview area --- */
+.pulse {
+  animation: pulse-bg 800ms ease-out;
+}
+@keyframes pulse-bg {
+  0%   { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.85); border-color: var(--accent); }
+  100% { box-shadow: 0 0 0 14px rgba(245, 158, 11, 0);  border-color: var(--border); }
+}
+
+/* --- "UPDATED" badge --- */
+.badge {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  margin-left: 8px;
+  opacity: 0;
+  transform: translateY(-2px);
+}
+
+/* Pops in, then fades away */
+.badge.updated {
+  animation:
+    badge-pop 160ms ease-out forwards,
+    badge-fade 1.6s ease 600ms forwards;
+}
+@keyframes badge-pop {
+  from { transform: scale(0.95) translateY(-2px); opacity: 0; }
+  to   { transform: scale(1.0)  translateY(-2px); opacity: 1; }
+}
+@keyframes badge-fade {
+  to { opacity: 0; }
+}

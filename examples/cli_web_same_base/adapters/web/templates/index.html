@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Start — Integer Sum{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h2>Run the demo locally</h2>
+  <form action="/start" method="post" class="form">
+    <label for="workspace">Workspace folder</label>
+    <input id="workspace" name="workspace" type="text" value="example_integer_sum" required>
+    <button type="submit">Start</button>
+  </form>
+  <p class="hint">This launches the same engine as the CLI, but renders in HTML.</p>
+</section>
+{% endblock %}
