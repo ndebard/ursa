@@ -1,26 +1,39 @@
 import argparse
+import asyncio
 
 # needed for checkpoint / restart
 import hashlib
 import importlib
 import json
 import os
+import re
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace as NS
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
+import aiosqlite
 import randomname
 import yaml
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
+
+# MCP server stuff, and async
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 # rich console stuff for beautification
 from rich import box, get_console
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    ProgressColumn,
+    SpinnerColumn,
+)
 from rich.table import Table
 from rich.text import Text
 
@@ -31,9 +44,99 @@ from ursa.util.logo_generator import kickoff_logo
 console = get_console()  # always returns the same instance
 
 
+def _invoke_planner_sync(agent, payload, config):
+    # PlanningAgent uses a SYNC graph & SYNC SqliteSaver
+    return agent.invoke(payload, config=config)
+
+
+def _invoke_executor_async(agent, payload, config):
+    """Run executor.ainvoke on the persistent background loop created by _ensure_bg_loop()."""
+    loop = _ensure_bg_loop()
+    coro = agent.ainvoke(payload, config=config)
+    # Run the coroutine on the same loop the AsyncSqliteSaver is bound to.
+    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    return fut.result()
+
+
+_BG_LOOP = None
+
+
+def _ensure_bg_loop():
+    """Start (or return) a persistent event loop in a background thread."""
+    global _BG_LOOP
+    if _BG_LOOP and _BG_LOOP.is_running():
+        return _BG_LOOP
+
+    loop = asyncio.new_event_loop()
+
+    def _runner():
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    _BG_LOOP = loop
+    return loop
+
+
+def make_async_sqlite_saver(db_path):
+    """
+    Create AsyncSqliteSaver bound to a persistent background event loop.
+    Uses LangGraph's helper if available; otherwise falls back to aiosqlite.
+    """
+
+    loop = _ensure_bg_loop()
+
+    async def _make():
+        # Prefer the built-in helper (newer LangGraph)
+        try:
+            # Some versions expose this as an async classmethod
+            if hasattr(AsyncSqliteSaver, "from_conn_string"):
+                return await AsyncSqliteSaver.from_conn_string(str(db_path))
+        except Exception:
+            pass
+
+        # Fallback: open aiosqlite connection and wrap
+        conn = await aiosqlite.connect(str(db_path))
+        return AsyncSqliteSaver(conn)
+
+    # Schedule the coroutine on the persistent loop and block for the result
+    fut = asyncio.run_coroutine_threadsafe(_make(), loop)
+    return fut.result()
+
+
 #########################################################################
 # BEGIN: Helpers related to checkpoint/restart
 #########################################################################
+def _is_async_saver(saver) -> bool:
+    return hasattr(saver, "aget_tuple")
+
+
+def _saver_get_tuple(saver, base_cfg):
+    """Works with SqliteSaver (sync) and AsyncSqliteSaver (async)."""
+    if _is_async_saver(saver):
+        return asyncio.run(saver.aget_tuple(base_cfg))
+    return saver.get_tuple(base_cfg)
+
+
+def _saver_list_all(saver, base_cfg):
+    """
+    Return a list of checkpoint tuples for both saver types.
+    Async version yields an async generator; we collect it here.
+    """
+    if _is_async_saver(saver):
+
+        async def _collect():
+            out = []
+            async for t in saver.alist(base_cfg):  # async generator
+                out.append(t)
+            return out
+
+        return asyncio.run(_collect())
+    # sync saver returns an iterator/generator
+    return list(saver.list(base_cfg))
+
+
 def _state_values(snapshot):
     """Normalize get_state(...) result to a plain dict of values."""
     try:
@@ -56,51 +159,49 @@ def _extract_values_from_checkpoint_tuple(cp_tuple) -> dict | None:
 
 def load_latest_planner_state_from_sqlite(saver, thread_id: str):
     """
-    Try to fetch the latest checkpoint for this thread from the SqliteSaver.
+    Planner uses SqliteSaver (sync). Stick to sync methods only.
     Returns (values_dict | None, resumed_cfg | None, debug_msg)
     """
     base_cfg = {"configurable": {"thread_id": thread_id}}
-    # 1) Fast path: get_tuple (latest for thread)
+
+    # 1) Try a simple get_tuple (sync)
+    tup = None
     try:
-        tup = saver.get_tuple(base_cfg)
-        vals = _extract_values_from_checkpoint_tuple(tup)
+        tup = saver.get_tuple(base_cfg)  # <-- SYNC
+    except Exception:
+        tup = None
+
+    def _vals_from_tuple(t):
+        if not t:
+            return None
+        ckpt = getattr(t, "checkpoint", None) or {}
+        return ckpt.get("channel_values") or ckpt.get("values") or None
+
+    if tup:
+        vals = _vals_from_tuple(tup)
         if vals:
-            # include the resolved checkpoint_id so you can pin to it if needed
             cp_id = tup.config["configurable"].get("checkpoint_id")
             cfg = {
                 "configurable": {"thread_id": thread_id, "checkpoint_id": cp_id}
             }
-            return (
-                vals,
-                cfg,
-                f"[dbg] resumed via get_tuple checkpoint_id={cp_id}",
-            )
-    except Exception as e:
-        print("[dbg] get_tuple error:", e)
+            return vals, cfg, "[dbg] resumed via get_tuple"
 
-    # 2) Fallback: iterate history (ordered newest→oldest)
+    # 2) Fallback: iterate history (sync)
     try:
-        latest = None
-        for t in saver.list(base_cfg):  # generator, newest first
-            latest = t
-            break
-        if latest:
-            vals = _extract_values_from_checkpoint_tuple(latest)
+        for t in saver.list(base_cfg):  # <-- SYNC
+            vals = _vals_from_tuple(t)
             if vals:
-                cp_id = latest.config["configurable"].get("checkpoint_id")
+                cp_id = t.config["configurable"].get("checkpoint_id")
                 cfg = {
                     "configurable": {
                         "thread_id": thread_id,
                         "checkpoint_id": cp_id,
                     }
                 }
-                return (
-                    vals,
-                    cfg,
-                    f"[dbg] resumed via list checkpoint_id={cp_id}",
-                )
-    except Exception as e:
-        print("[dbg] saver.list error:", e)
+                return vals, cfg, "[dbg] resumed via list"
+            break  # we only care about the newest
+    except Exception:
+        pass
 
     return None, None, "[dbg] no existing planner checkpoint found"
 
@@ -113,6 +214,35 @@ def load_latest_planner_state_from_sqlite(saver, thread_id: str):
 #########################################################################
 # BEGIN: Helpers for viewing the plan
 #########################################################################
+
+
+def ws_tag_text(workspace: str) -> Text:
+    t = Text()
+    t.append("[", style="bold bright_magenta")
+    t.append(workspace, style="bold bright_magenta")
+    t.append("] ", style="bold bright_magenta")
+    return t
+
+
+def ws_renderable(workspace: str, msg: str | Text) -> Text:
+    base = ws_tag_text(workspace)
+    if isinstance(msg, Text):
+        base += msg
+    else:
+        # if your msg contains rich markup, parse it; otherwise just append
+        try:
+            base += Text.from_markup(msg)
+        except Exception:
+            base.append(msg)
+    return base
+
+
+def status_ws(console, workspace: str, msg: str, **kw):
+    # robust: pass a real renderable, not a plain str
+    renderable = ws_renderable(workspace, msg)
+    return console.status(renderable, **({"spinner": "point"} | kw))
+
+
 # --- nice rendering for planner output ---
 def _last_message_text(messages) -> str:
     if not messages:
@@ -696,16 +826,384 @@ def _print_next_step(prefix: str, next_zero: int, total: int, workspace: str):
 # END: Assorted other helpers
 #########################################################################
 
+#########################################################################
+# BEGIN: Helpers related to MCP
+#########################################################################
+
+
+def _build_mcp_client_configs(mcp_cfg: dict) -> list[dict]:
+    """
+    Turn YAML mcp.servers entries into MultiServerMCPClient configs.
+    Supports 'stdio' transport (recommended). 'sse' can be added later.
+    """
+    servers = []
+    for s in mcp_cfg.get("servers", []):
+        name = s["name"]
+        transport = s.get("transport", "stdio").lower()
+
+        if transport == "stdio":
+            # Required by the adapter: name, command, args, env (env optional)
+            servers.append({
+                "name": name,
+                "command": s["command"],
+                "args": s.get("args", []),
+                "env": s.get("env", {}),
+            })
+        else:
+            # For future SSE support: you could accept `url:` here
+            raise ValueError(f"Unsupported MCP transport: {transport}")
+    return servers
+
+
+def load_mcp_tools_from_yaml(mcp_cfg: dict) -> list:
+    """
+    Sync-safe wrapper that:
+      - builds a MultiServerMCPClient from YAML
+      - awaits client.get_tools()
+      - returns a flat list of LangChain tools
+    """
+    if not mcp_cfg or not mcp_cfg.get("start_servers"):
+        return []
+
+    # mcp_cfg is your parsed YAML block
+    servers_cfg = (mcp_cfg or {}).get("servers", [])
+    timeout_sec = (mcp_cfg or {}).get("timeout_sec", 60)
+
+    # Convert list -> dict: { name: connection_config }
+    connections: dict[str, dict] = {}
+    for srv in servers_cfg:
+        name = srv["name"]
+        transport = srv.get("transport", "stdio")
+
+        if transport == "stdio":
+            cmd = srv.get("command")
+            args = srv.get("args", [])
+            if not cmd or not args:
+                raise ValueError(
+                    f"MCP stdio server '{name}' requires 'command' and non-empty 'args'"
+                )
+            conn = {
+                "transport": "stdio",
+                "command": cmd,
+                "args": args,
+            }
+            if srv.get("env"):
+                merged = os.environ.copy()
+                merged.update(
+                    srv["env"]
+                )  # keep all existing vars, override with YAML
+                conn["env"] = merged
+
+        elif transport == "sse":
+            url = srv.get("url")
+            if not url:
+                raise ValueError(f"MCP SSE server '{name}' requires 'url'")
+            conn = {"transport": "sse", "url": url}
+            if srv.get("headers"):
+                conn["headers"] = srv["headers"]
+
+        else:
+            raise ValueError(f"Unknown MCP transport for '{name}': {transport}")
+
+        connections[name] = conn
+
+    async def _go():
+        client = MultiServerMCPClient(connections)
+        try:
+            # enforce timeout here; don't pass unsupported kwargs to the client
+            tools = await asyncio.wait_for(
+                client.get_tools(), timeout=timeout_sec
+            )
+            return tools
+        finally:
+            # be polite to subprocesses / sockets
+            try:
+                await client.aclose()
+            except AttributeError:
+                # older versions may not have aclose()
+                pass
+
+    return asyncio.run(_go())
+
+
+def _redact_env_for_print(env: dict) -> dict:
+    if not env:
+        return {}
+    red = {}
+    for k, v in env.items():
+        if any(
+            tok in k.upper() for tok in ("KEY", "TOKEN", "SECRET", "PASSWORD")
+        ):
+            red[k] = "********"
+        else:
+            red[k] = v
+    return red
+
+
+def _one_line_desc(s: str, limit: int = 100) -> str:
+    s = (s or "").strip().replace("\n", " ")
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def _sanitize_tool_names_for_openai(tools: list) -> list:
+    """
+    Mutate tool names in-place to match OpenAI's ^[a-zA-Z0-9_-]+$.
+    Also dedup if collisions occur after sanitization.
+    """
+    taken = set()
+    for t in tools:
+        raw = getattr(t, "name", "") or "tool"
+        # replace illegal chars with underscore
+        safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", raw)
+        # guarantee non-empty, then ensure uniqueness
+        if not safe:
+            safe = "tool"
+        base = safe
+        i = 2
+        while safe in taken:
+            safe = f"{base}_{i}"
+            i += 1
+        setattr(t, "name", safe)
+        taken.add(safe)
+    return tools
+
+
+def _display_tool_name(name: str) -> str:
+    """
+    Cosmetic: show 's3.list_objects' to humans even if bound name is 's3_list_objects'.
+    Only replaces the first underscore so subparts remain readable.
+    """
+    if not name:
+        return "unknown"
+    return name.replace("_", ".", 1)
+
+
+def _prompt_with_timeout(
+    prompt: str, timeout_sec: int, default: str = ""
+) -> str:
+    """
+    Prompt the user with a timeout using the existing sync helper.
+    Returns the user's input, or `default` if they hit Enter / timeout / non-interactive.
+    """
+    resp = timed_input_with_countdown(prompt, timeout_sec)
+    if resp is None or resp.strip() == "":
+        return default
+    return resp
+
+
+async def _load_mcp_tools_async(
+    connections: Dict[str, Dict[str, Any]], timeout_sec: int
+) -> List:
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+
+    client = MultiServerMCPClient(connections)
+    try:
+        return await asyncio.wait_for(client.get_tools(), timeout=timeout_sec)
+    finally:
+        try:
+            await client.aclose()
+        except AttributeError:
+            pass
+
+
+def _preview_mcp_interactive(
+    connections: Dict[str, Dict[str, Any]], timeout_sec: int
+) -> List:
+    """Show servers, list tools, ask user to continue. Returns a list of LC tools or []."""
+    if not connections:
+        return []
+
+    # 1) Show what we’re about to start
+    print("\nAbout to start these MCP servers:")
+    for name, cfg in connections.items():
+        transport = cfg.get("transport", "stdio")
+        print(f"  - {name} ({transport})")
+        if transport == "stdio":
+            print(f"      command: {cfg.get('command')}")
+            print(f"      args:    {cfg.get('args', [])}")
+            env = _redact_env_for_print(cfg.get("env") or {})
+            if env:
+                print(f"      env:     {env}")
+        elif transport == "sse":
+            print(f"      url:     {cfg.get('url')}")
+            hdr = _redact_env_for_print(cfg.get("headers") or {})
+            if hdr:
+                print(f"      headers: {hdr}")
+
+    # 2) Load tools (real connections) so we can show exactly what the agent will get
+    try:
+        tools = asyncio.run(_load_mcp_tools_async(connections, timeout_sec))
+    except Exception as e:
+        print(f"\nFailed to connect to MCP servers: {e}")
+        ans = _prompt_with_timeout(
+            "Continue without MCP tools? (Enter=yes / 'n'=abort)\n> ",
+            timeout_sec=min(timeout_sec, 60),
+            default="",
+        )
+        if ans.strip().lower() in {"n", "no"}:
+            raise SystemExit("Aborted by user.")
+        return []
+
+    # 2.5) Sanitize names for OpenAI (no dots/spaces etc.) BEFORE binding later.
+    tools = _sanitize_tool_names_for_openai(tools)
+
+    # 3) Group tools under the actual server labels from YAML connections.
+    grouped: Dict[str, List[Tuple[str, str]]] = {
+        name: [] for name in connections.keys()
+    }
+    unknown_bucket: List[Tuple[str, str]] = []
+    server_labels = list(connections.keys())
+
+    for t in tools:
+        tname = getattr(t, "name", "") or "unknown"
+        tdesc = getattr(t, "description", "") or ""
+        # best-effort: assign to the server whose label matches the leading prefix before first underscore
+        assigned = False
+        for srv in server_labels:
+            if tname.startswith(srv + "_"):
+                grouped[srv].append((
+                    _display_tool_name(tname),
+                    _one_line_desc(tdesc),
+                ))
+                assigned = True
+                break
+        if not assigned:
+            unknown_bucket.append((
+                _display_tool_name(tname),
+                _one_line_desc(tdesc),
+            ))
+
+    print("\nMCP tools discovered:")
+    for server in sorted(grouped.keys()):
+        rows = grouped[server]
+        print(f"  {server}:")
+        for n, d in sorted(rows):
+            print(f"    - {n}  —  {d}")
+    if unknown_bucket:
+        print("  unknown:")
+        for n, d in sorted(unknown_bucket):
+            print(f"    - {n}  —  {d}")
+
+    # 4) Confirm
+    ans = _prompt_with_timeout(
+        "\nPress Enter to continue with these tools, or type 'n' to abort (Ctrl-C to quit).\n> ",
+        timeout_sec=min(timeout_sec, 60),
+        default="",
+    )
+    if ans.strip().lower() in {"n", "no", "abort"}:
+        raise SystemExit("Aborted by user.")
+    return tools
+
+
+def build_mcp_connections_from_yaml(
+    mcp_cfg: dict, cfg_path: str | Path | None = None
+) -> Dict[str, dict]:
+    """
+    Convert YAML 'mcp.servers' into a dict that MultiServerMCPClient expects:
+      {
+        "<name>": {
+          "transport": "stdio" | "sse",
+          ... (per-transport fields)
+        },
+        ...
+      }
+
+    It also resolves relative script paths against the directory of the YAML file.
+    """
+    if not isinstance(mcp_cfg, dict):
+        return {}
+
+    servers = mcp_cfg.get("servers", []) or []
+    if not isinstance(servers, list):
+        raise ValueError("mcp.servers must be a list")
+
+    cfg_dir = Path(cfg_path).resolve().parent if cfg_path else Path.cwd()
+
+    connections: Dict[str, dict] = {}
+
+    for s in servers:
+        if not isinstance(s, dict):
+            continue
+        name = s.get("name")
+        if not name:
+            raise ValueError("Each MCP server entry requires a 'name'")
+
+        transport = (s.get("transport") or "stdio").lower()
+
+        if transport == "stdio":
+            cmd = s.get("command")
+            args = list(s.get("args", []))
+            if not cmd or not args:
+                raise ValueError(
+                    f"MCP stdio server '{name}' requires 'command' and non-empty 'args'"
+                )
+
+            # Best-effort path resolution for python scripts in args
+            # (keeps user YAML simple, independent of CWD)
+            def _resolve_path_like(a: str) -> str:
+                # Only try to resolve things that look like files
+                if not a:
+                    return a
+                p = Path(a)
+                if p.is_absolute() and p.exists():
+                    return str(p)
+                # relative—try alongside the YAML
+                p1 = cfg_dir / a
+                if p1.exists():
+                    return str(p1)
+                return a  # leave as-is
+
+            resolved_args = []
+            for a in args:
+                # If it looks like a script (e.g., *.py) or a relative path, try to resolve
+                if isinstance(a, str) and (
+                    a.endswith(".py") or "/" in a or "\\" in a
+                ):
+                    resolved_args.append(_resolve_path_like(a))
+                else:
+                    resolved_args.append(a)
+
+            conn = {
+                "transport": "stdio",
+                "command": cmd,
+                "args": resolved_args,
+            }
+            if s.get("env"):
+                merged = os.environ.copy()
+                merged.update(
+                    s["env"]
+                )  # keep all existing vars, override with YAML
+                conn["env"] = merged
+
+        elif transport == "sse":
+            url = s.get("url")
+            if not url:
+                raise ValueError(f"MCP SSE server '{name}' requires 'url'")
+            conn = {"transport": "sse", "url": url}
+            if s.get("headers"):
+                conn["headers"] = s["headers"]
+
+        else:
+            raise ValueError(f"Unknown MCP transport for '{name}': {transport}")
+
+        connections[name] = conn
+
+    return connections
+
+
+#########################################################################
+# END: Helpers related to MCP
+#########################################################################
+
 
 def setup_agents(workspace: str, model) -> tuple[str, tuple, tuple]:
     # first, setup checkpoint / recover pathways
-    edb_path = _ckpt_dir(workspace) / "executor_checkpoint.db"
-    econn = sqlite3.connect(str(edb_path), check_same_thread=False)
-    executor_checkpointer = SqliteSaver(econn)
-
     pdb_path = _ckpt_dir(workspace) / "planner_checkpoint.db"
     pconn = sqlite3.connect(str(pdb_path), check_same_thread=False)
-    planner_checkpointer = SqliteSaver(pconn)
+    planner_checkpointer = SqliteSaver(pconn)  # <-- sync saver for planner
+
+    edb_path = _ckpt_dir(workspace) / "executor_checkpoint.db"
+    executor_checkpointer = make_async_sqlite_saver(edb_path)  # <-- async saver
 
     # Initialize the agents
     planner = PlanningAgent(
@@ -714,12 +1212,21 @@ def setup_agents(workspace: str, model) -> tuple[str, tuple, tuple]:
         enable_metrics=True,
         metrics_dir=Path(workspace) / "ursa_metrics",
     )  # include checkpointer
+
+    # MCP tools - prefer the ones loaded in the chooser step (if any)
+    mcp_tools = getattr(cfg, "_mcp_tools", None)
+    if mcp_tools is None:
+        # Fallback: load here if user skipped preview (or in non-interactive mode)
+        mcp_cfg = getattr(cfg, "mcp", {}) or {}
+        mcp_tools = load_mcp_tools_from_yaml(mcp_cfg) if mcp_cfg else []
+
     executor = ExecutionAgent(
         llm=model,
         checkpointer=executor_checkpointer,
         enable_metrics=True,
         metrics_dir=Path(workspace) / "ursa_metrics",
-    )  # include checkpointer
+        extra_tools=mcp_tools if mcp_tools else None,
+    )
     # Use the workspace as the thread id (one thread per workspace)
     thread_id = Path(workspace).name
     planner.thread_id = thread_id
@@ -851,10 +1358,11 @@ def main_plan_load_or_perform(
         # NOTE: This path is where we've recovered from a checkpoint
     else:
         # Fresh plan - need to do a plan
-        with console.status(
-            "[bold green]Planning overarching steps . . .", spinner="point"
+        with status_ws(
+            console, workspace, "[bold blue]Planning overarching steps . . ."
         ):
-            planning_output = planner.invoke(
+            planning_output = _invoke_planner_sync(
+                planner,
                 {"messages": [HumanMessage(content=problem)]},
                 config={
                     "recursion_limit": 999_999,
@@ -930,7 +1438,8 @@ def get_or_create_subplan(
     _old_tid = planner.thread_id
     planner.thread_id = sub_tid
     try:
-        sub_output = planner.invoke(
+        sub_output = _invoke_planner_sync(
+            planner,
             {"messages": [HumanMessage(content=step_prompt)]},
             config={
                 "recursion_limit": 999_999,
@@ -976,31 +1485,79 @@ def run_substeps(
     workspace: str,
     symlinkdict,
     stepwise_exit: bool,
+    is_hierarchical: bool,
 ):
     sub_prog = load_progress(m_idx)
     sub_start_idx = int(sub_prog.get("next_index", 0))
     prev_sub_summary = sub_prog.get("last_summary", "Start sub-steps.")
     total_sub = len(sub_steps)
 
+    # If single-mode, force a 1-sub-step view even if the list happens to be longer.
+    visible_total = total_sub if is_hierarchical else 1
+
+    if total_sub == 0:
+        console.print(
+            Panel.fit("No sub-steps for this main step.", border_style="yellow")
+        )
+        return prev_sub_summary
+
     render_plan_steps_rich(sub_steps, highlight_index=sub_start_idx)
 
-    last_ran_summary = prev_sub_summary  # <— track the latest one we executed
+    last_ran_summary = prev_sub_summary
+    main_human = m_idx + 1
 
+    class WorkspaceDescriptionColumn(ProgressColumn):
+        def render(self, task):
+            ws = task.fields.get("ws", "")
+            t = Text()
+            if ws:
+                t.append("[", style="bold magenta")
+                t.append(str(ws), style="bold magenta")
+                t.append("] ", style="bold magenta")
+            t.append(task.description or "")
+            return t
+
+    class StepLabelColumn(ProgressColumn):
+        """Hier: 'Step M/TM: SubStep S/TS'  |  Single: 'Step M/TM'."""
+
+        def render(self, task):
+            f = task.fields
+            main = int(f.get("main", 1))
+            total_main = int(f.get("total_main", 1))
+            if f.get("is_hierarchical"):
+                sub = min(int(f.get("sub", 1)), int(f.get("total_sub", 1)))
+                total_sub = int(f.get("total_sub", 1))
+                return Text(
+                    f"Step {main}/{total_main}: SubStep {sub}/{total_sub}"
+                )
+            return Text(f"Step {main}/{total_main}")
+
+    # Loop over sub-steps (for single mode this will still run once)
     while sub_start_idx < total_sub:
         current_sub = sub_steps[sub_start_idx]
+
         with Progress(
             SpinnerColumn(spinner_name="point"),
-            TextColumn("[progress.description]{task.description}"),
+            WorkspaceDescriptionColumn(),
             BarColumn(),
-            TextColumn("Step {task.fields[current]}/{task.total}"),
+            StepLabelColumn(),  # <— our custom label
             console=console,
             transient=True,
+            expand=True,
         ) as sub_progress:
+            # Fields for the label column
             sub_task = sub_progress.add_task(
-                f"Execute sub-step: {step_to_text(current_sub)[:60]} . . .",
-                total=1,
-                completed=0,
-                current=1,
+                f"Execute sub-step: {step_to_text(current_sub)[:80]} . . .",
+                total=visible_total,
+                completed=sub_start_idx if is_hierarchical else 0,
+                ws=workspace,
+                is_hierarchical=is_hierarchical,
+                main=main_human,
+                total_main=total_main,
+                sub=(sub_start_idx + 1)
+                if is_hierarchical
+                else main_human,  # keep something sane in single mode
+                total_sub=visible_total,
             )
 
             sub_exec_prompt = (
@@ -1011,7 +1568,8 @@ def run_substeps(
                 "Execute this sub-step and report the results fully—no placeholders."
             )
 
-            sub_result = executor.invoke(
+            sub_result = _invoke_executor_async(
+                executor,
                 {
                     "messages": [HumanMessage(content=sub_exec_prompt)],
                     "workspace": workspace,
@@ -1024,12 +1582,19 @@ def run_substeps(
             )
 
             last_sub_summary = sub_result["messages"][-1].content
-            last_ran_summary = last_sub_summary  # <—
+            last_ran_summary = last_sub_summary
             sub_progress.console.log(last_sub_summary)
-            sub_progress.advance(sub_task)
-            sub_progress.update(sub_task, current=1, completed=1)
-            sub_progress.remove_task(sub_task)
 
+            # Advance counts
+            sub_progress.advance(
+                sub_task, 1 if is_hierarchical else visible_total
+            )
+            if is_hierarchical:
+                # bump SubStep label to the next one (if any)
+                next_human_sub = min(sub_start_idx + 2, visible_total)
+                sub_progress.update(sub_task, sub=next_human_sub)
+
+        # Save progress & possibly checkpoint-exit
         next_sub_zero = sub_start_idx + 1
         save_progress(m_idx, next_sub_zero, last_sub_summary)
 
@@ -1039,14 +1604,17 @@ def run_substeps(
             print(f"[checkpoint] main step: {m_idx + 1} of {total_main}")
             _print_next_step(
                 prefix="Re-run with the SAME --workspace to continue.\n",
-                next_zero=next_sub_zero,
-                total=total_sub,
+                next_zero=next_sub_zero if is_hierarchical else (m_idx + 1),
+                total=visible_total if is_hierarchical else total_main,
                 workspace=workspace,
             )
             exit()
 
         prev_sub_summary = last_sub_summary
         sub_start_idx = next_sub_zero
+        if not is_hierarchical:
+            # single-mode: only one iteration per main step
+            break
 
     return last_ran_summary
 
@@ -1198,6 +1766,10 @@ def main(
         )
         planner, planner_checkpointer, pdb_path = planner_tuple
         executor, _, edb_path = executor_tuple
+
+        print("These are the tools the ExecutionAgent can see:")
+        executor.remove_tool("")
+        executor.list_tools()
 
         # print the problem we're solving in a nice little box / panel
         console.print(
@@ -1397,6 +1969,7 @@ def main(
                     workspace,
                     symlinkdict,
                     stepwise_exit,
+                    is_hierarchical=True,  # we're in hierarchical mode
                 )
 
                 # advance main progress and continue
@@ -1508,6 +2081,7 @@ def main(
                         workspace,
                         symlinkdict,
                         stepwise_exit,
+                        is_hierarchical=False,  # we're NOT in hierarchical mode
                     )
 
         # Wrap-up
@@ -1520,7 +2094,7 @@ def main(
         import traceback
 
         traceback.print_exc()
-        return {"error": str(e)}
+        return {"error": str(e)}, locals().get("workspace")
 
 
 def parse_args_and_user_inputs():
@@ -1563,6 +2137,7 @@ def parse_args_and_user_inputs():
             if not isinstance(raw_cfg, dict):
                 raise ValueError("Top-level YAML must be a mapping/object.")
             cfg = NS(**raw_cfg)  # top-level attrs; nested remain dicts
+        cfg_path = Path(args.config).resolve()
     except FileNotFoundError:
         print(f"Config file not found: {args.config}", file=sys.stderr)
         sys.exit(2)
@@ -1669,6 +2244,22 @@ def parse_args_and_user_inputs():
                 "single", args.interactive_timeout
             )
         )
+        mcp_tools = []
+        mcp_cfg = getattr(cfg, "mcp", None)
+        if isinstance(mcp_cfg, dict) and mcp_cfg.get("start_servers", False):
+            connections = build_mcp_connections_from_yaml(
+                mcp_cfg, cfg_path=cfg_path
+            )
+            if connections:
+                mcp_timeout = int(mcp_cfg.get("timeout_sec", 60))
+                mcp_tools = _preview_mcp_interactive(
+                    connections, timeout_sec=mcp_timeout
+                )
+            else:
+                print(
+                    "No MCP connections were constructed from YAML; continuing without MCP tools."
+                )
+        setattr(cfg, "_mcp_tools", mcp_tools)
 
     except KeyboardInterrupt:
         print("\nAborted by user.")
